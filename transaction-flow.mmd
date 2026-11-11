@@ -1,0 +1,40 @@
+flowchart TD
+    A([Start]) --> B[Fetch YNAB accounts, categories, groups, and payees]
+    B --> C{Metadata fetched?}
+    C -- No --> X[Show fetch error and exit]
+    C -- Yes --> D[Read transaction text]
+    D --> E[Send text and YNAB names to local model]
+    E --> F[Parse merchant, amount, memo, account, and category choice]
+    F --> G[Set transaction date to today's date]
+    G --> H[Match account and existing category/payee IDs]
+    H --> I[Show transaction preview]
+    I --> J{User confirms with y?}
+    J -- No --> K[Discard transaction]
+    J -- Yes --> L{Account valid and category specified?}
+    L -- No --> M[Do not save; show missing/invalid mapping]
+    L -- Yes --> N{Category already matched?}
+    N -- Yes --> P[Use matched category ID]
+    N -- No --> Q{Category group already exists?}
+    Q -- No --> R[Create category group in YNAB]
+    Q -- Yes --> S[Use existing group ID]
+    R --> T[Check for category with same name in group]
+    S --> T
+    T --> U{Category already exists in group?}
+    U -- Yes --> V[Reuse existing category ID]
+    U -- No --> W[Create category in YNAB]
+    V --> Y
+    W --> Y
+    P --> Y{Payee already matched?}
+    Y -- Yes --> AA[Use existing payee ID]
+    Y -- No --> AB[Create payee from extracted merchant name]
+    AA --> AC[Convert amount to negative milliunits]
+    AB --> AC
+    AC --> AD[Create transaction in YNAB]
+    AD --> AE([Done])
+
+    B -. API error .-> X
+    E -. Model or JSON error .-> AF[Show processing error]
+    R -. API error .-> AF
+    W -. API error .-> AF
+    AB -. API error .-> AF
+    AD -. API error .-> AF
