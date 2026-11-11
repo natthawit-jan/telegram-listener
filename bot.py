@@ -82,7 +82,7 @@ def account_picker(resolved, page=0):
     page = max(0, min(page, page_count - 1))
     start = page * ACCOUNT_PAGE_SIZE
     page_accounts = accounts[start : start + ACCOUNT_PAGE_SIZE]
-    suggested_id = resolved["matched_account_id"]
+    suggested_id = resolved["suggested_account_id"]
 
     text = transaction_summary(
         resolved,
@@ -117,6 +117,11 @@ def account_picker(resolved, page=0):
         })
     if navigation:
         rows.append(navigation)
+    if any(account_id == suggested_id for _, account_id in accounts):
+        rows.append([{
+            "text": "Use suggested account",
+            "callback_data": "use-suggested-account",
+        }])
     rows.append([{"text": "Cancel", "callback_data": "cancel"}])
     return text, {"inline_keyboard": rows}
 
@@ -168,6 +173,36 @@ def handle_callback_query(callback_query):
         text, keyboard = account_picker(pending["resolved"], page)
         edit_telegram_message(chat_id, message_id, text, keyboard)
         answer_callback_query(callback_id)
+        return
+
+    if action == "use-suggested-account":
+        if pending["stage"] != "selecting":
+            answer_callback_query(callback_id, "Choose Change account first.")
+            return
+        resolved = pending["resolved"]
+        suggested_id = resolved["suggested_account_id"]
+        suggested_account = next(
+            (
+                (name, account_id)
+                for name, account_id in resolved["account_options"]
+                if account_id == suggested_id
+            ),
+            None,
+        )
+        if not suggested_account:
+            answer_callback_query(callback_id, "There is no valid suggested account.")
+            return
+        name, account_id = suggested_account
+        resolved["matched_account_name"] = name
+        resolved["matched_account_id"] = account_id
+        pending["stage"] = "confirming"
+        edit_telegram_message(
+            chat_id,
+            message_id,
+            transaction_summary(resolved, name) + "\n\nReply YES to save or NO to cancel.",
+            confirmation_keyboard(),
+        )
+        answer_callback_query(callback_id, f"Using {name}. Confirm to save.")
         return
 
     if action.startswith("account:"):
@@ -230,7 +265,32 @@ def preview_transaction(raw_text):
         parsed, accounts_map, categories_map, payees_map, category_groups_map
     )
     resolved["account_options"] = sorted(accounts_map.items())
+    resolved["suggested_account_id"] = resolved["matched_account_id"]
+    resolved["edit_context"] = {
+        "accounts_map": accounts_map,
+        "categories_map": categories_map,
+        "payees_map": payees_map,
+        "category_groups_map": category_groups_map,
+    }
     return resolved
+
+
+def render_pending_transaction(pending):
+    """Render the pending transaction and its available actions."""
+    resolved = pending["resolved"]
+    if pending["stage"] == "selecting":
+        text, keyboard = account_picker(resolved)
+    else:
+        text = transaction_summary(
+            resolved, resolved["matched_account_name"] or "(choose an account)"
+        ) + "\n\nReply YES to save or NO to cancel."
+        keyboard = confirmation_keyboard()
+    text += (
+        "\n\nYou can send a correction any time before saving, "
+        "for example: 'payee should be Cafe Amazon', "
+        "'category should be Dining', or 'memo should be lunch'."
+    )
+    return text, keyboard
 
 
 def save_confirmed_transaction(resolved):
@@ -313,13 +373,35 @@ def receive_message():
                 PENDING_TRANSACTIONS.pop(chat_id, None)
                 send_telegram_message(chat_id, "Transaction cancelled.")
             else:
-                if pending["stage"] == "selecting":
-                    send_telegram_message(chat_id, "Please select an account using the buttons.")
-                else:
+                resolved, account_was_changed = ynab_bot.edit_transaction_details(
+                    text,
+                    pending["resolved"],
+                    **pending["resolved"]["edit_context"],
+                )
+                if not resolved["matched_category_name"]:
+                    raise ValueError("The correction did not resolve to a category.")
+                if not (
+                    resolved["matched_category_id"]
+                    or resolved["matched_category_group_name"]
+                ):
+                    raise ValueError("The correction did not resolve to a category group.")
+                pending["resolved"] = resolved
+                if account_was_changed:
+                    pending["stage"] = "confirming"
+                rendered_text, keyboard = render_pending_transaction(pending)
+                message_id = pending.get("message_id")
+                if message_id:
+                    edit_telegram_message(chat_id, message_id, rendered_text, keyboard)
                     send_telegram_message(
                         chat_id,
-                        "Please reply YES to save this transaction or NO to cancel.",
+                        "Updated the transaction. Review it and confirm when ready.",
                     )
+                else:
+                    sent_message = send_telegram_message(
+                        chat_id, rendered_text, keyboard
+                    )
+                    if sent_message:
+                        pending["message_id"] = sent_message.get("message_id")
             return jsonify({"status": "ok"})
 
         resolved = preview_transaction(text)
@@ -332,7 +414,9 @@ def receive_message():
             "resolved": resolved,
             "stage": "selecting",
         }
-        selection_text, keyboard = account_picker(resolved)
+        selection_text, keyboard = render_pending_transaction(
+            PENDING_TRANSACTIONS[chat_id]
+        )
         sent_message = send_telegram_message(chat_id, selection_text, keyboard)
         if sent_message:
             PENDING_TRANSACTIONS[chat_id]["message_id"] = sent_message.get("message_id")

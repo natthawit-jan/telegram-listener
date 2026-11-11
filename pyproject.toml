@@ -9,5 +9,6 @@ dependencies = [
     "gunicorn>=27.0.0",
     "openai>=3.48.0",
     "python-dotenv>=1.2.4",
+    "typing-extensions>=4.16.0",
     "ynab>=5.0.0",
 ]

@@ -1,4 +1,5 @@
 import json
+import math
 import os
 import re
 from datetime import date
@@ -32,8 +33,7 @@ def get_ynab_metadata():
     # 1. Fetch Accounts
     accounts_api = ynab.AccountsApi(api_client)
     acc_response = accounts_api.get_accounts(BUDGET_ID)
-    accounts = {acc.name: acc.id for acc in acc_response.data.accounts if not acc.closed}
-
+    accounts = {acc.name: acc.id for acc in acc_response.data.accounts if not acc.closed and acc.on_budget and acc.type in ["cash", "savings", "checking"]}
     # 2. Fetch Categories
     categories_api = ynab.CategoriesApi(api_client)
     cat_response = categories_api.get_categories(BUDGET_ID)
@@ -110,6 +110,156 @@ def parse_and_match_transaction(
   transaction["target_category"] = existing_category or new_category_name
   transaction["date"] = date.today().isoformat()
   return transaction
+
+
+def edit_transaction_details(
+    instruction: str,
+    resolved: dict,
+    accounts_map: dict,
+    categories_map: dict,
+    payees_map: dict,
+    category_groups_map: dict,
+):
+  """Apply only the transaction fields explicitly changed by a follow-up."""
+  parsed = resolved["parsed"]
+  current_details = {
+      "payee": parsed.get("raw_payee", ""),
+      "amount": parsed.get("amount"),
+      "memo": parsed.get("memo", ""),
+      "account": resolved.get("matched_account_name"),
+      "category": resolved.get("matched_category_name"),
+      "category_group": resolved.get("matched_category_group_name"),
+  }
+  prompt = f"""
+    Update a pending financial transaction based only on the user's correction.
+    Current transaction: {json.dumps(current_details)}
+
+    Available account names: {json.dumps(list(accounts_map))}
+    Available category labels (format "Group / Category"): {json.dumps(list(categories_map))}
+    Available category groups: {json.dumps(list(category_groups_map))}
+
+    Return one JSON object with exactly these keys:
+    "raw_payee", "amount", "memo", "target_account", "target_category",
+    "target_category_group".
+    Set a value to null unless the user explicitly asks to change that field.
+    For payee and memo, return strings; an empty string clears the field.
+    Amount must be a positive number.
+    For target_account, use an exact available account name.
+    For target_category, use an exact available "Group / Category" label if one fits;
+    otherwise use the requested new category name. If creating a category, also
+    provide its parent target_category_group, using an available group or the
+    explicitly requested new group. A category group alone cannot be changed.
+    Do not infer changes from the current transaction or modify unmentioned fields.
+    Return JSON only.
+
+    User correction: {json.dumps(instruction)}
+  """
+  response = client.chat.completions.create(
+      model=OPENAI_MODEL,
+      messages=[{"role": "user", "content": prompt}],
+      temperature=0.0,
+  )
+  content = response.choices[0].message.content.strip()
+  if content.startswith("```"):
+    content = content.split("```")[1]
+    if content.startswith("json"):
+      content = content[4:]
+  changes = json.loads(content.strip())
+  if not isinstance(changes, dict):
+    raise ValueError("The model did not return a JSON object for the correction.")
+  allowed_fields = {
+      "raw_payee",
+      "amount",
+      "memo",
+      "target_account",
+      "target_category",
+      "target_category_group",
+  }
+  if set(changes) - allowed_fields:
+    raise ValueError("The model returned unknown fields for the correction.")
+
+  updated_parsed = parsed.copy()
+  payee = changes.get("raw_payee")
+  if payee is not None:
+    if not isinstance(payee, str):
+      raise ValueError("The corrected payee must be text.")
+    updated_parsed["raw_payee"] = payee.strip()
+
+  amount = changes.get("amount")
+  if amount is not None:
+    if isinstance(amount, bool) or not isinstance(amount, (int, float)):
+      raise ValueError("The corrected amount must be a positive number.")
+    if not math.isfinite(amount) or amount <= 0:
+      raise ValueError("The corrected amount must be a positive number.")
+    updated_parsed["amount"] = amount
+
+  memo = changes.get("memo")
+  if memo is not None:
+    if not isinstance(memo, str):
+      raise ValueError("The corrected memo must be text.")
+    updated_parsed["memo"] = memo.strip()
+
+  target_account = changes.get("target_account")
+  account_was_changed = target_account is not None
+  if account_was_changed:
+    if not isinstance(target_account, str):
+      raise ValueError("The corrected account must be an available account name.")
+    matched_account = next(
+        (
+            name
+            for name in accounts_map
+            if name.casefold() == target_account.strip().casefold()
+        ),
+        None,
+    )
+    if not matched_account:
+      raise ValueError("The corrected account is not in the available YNAB accounts.")
+    updated_parsed["target_account"] = matched_account
+
+  target_category = changes.get("target_category")
+  target_category_group = changes.get("target_category_group")
+  if target_category is not None:
+    if not isinstance(target_category, str) or not target_category.strip():
+      raise ValueError("The corrected category must not be empty.")
+    target_category = target_category.strip()
+    existing_category = next(
+        (
+            label
+            for label in categories_map
+            if label.casefold() == target_category.casefold()
+        ),
+        None,
+    )
+    if existing_category:
+      parent_group = existing_category.rsplit(" / ", 1)[0]
+      updated_parsed["existing_category"] = existing_category
+      updated_parsed["new_category_name"] = ""
+      updated_parsed["target_category"] = existing_category
+      updated_parsed["target_category_group"] = parent_group
+    else:
+      if not isinstance(target_category_group, str) or not target_category_group.strip():
+        raise ValueError("A parent group is required when creating a new category.")
+      updated_parsed["existing_category"] = ""
+      updated_parsed["new_category_name"] = target_category
+      updated_parsed["target_category"] = target_category
+      updated_parsed["target_category_group"] = target_category_group.strip()
+  elif target_category_group is not None:
+    raise ValueError("Specify a category along with its parent group.")
+
+  updated = resolve_transaction_details(
+      updated_parsed,
+      accounts_map,
+      categories_map,
+      payees_map,
+      category_groups_map,
+  )
+  if not account_was_changed:
+    updated["matched_account_name"] = resolved["matched_account_name"]
+    updated["matched_account_id"] = resolved["matched_account_id"]
+  updated["account_options"] = resolved["account_options"]
+  updated["suggested_account_id"] = resolved["suggested_account_id"]
+  updated["edit_context"] = resolved["edit_context"]
+  return updated, account_was_changed
 
 
 def match_account_from_text(raw_text, available_accounts):

@@ -27,9 +27,12 @@ It waits for the model before starting Gunicorn, then opens the Pinggy tunnel
 and registers the Telegram webhook. Keep the command running while the bot is
 in use. Press Ctrl+C to stop the services started by the launcher.
 
-For each transaction, the bot presents paginated account buttons. Select the
-account to use, then confirm the transaction; use Change account to choose a
-different one before saving.
+For each transaction, the bot presents paginated account buttons. If an account
+was matched from the message, use **Use suggested account** to review and confirm
+it, or select a different account. Confirm the transaction before it is saved.
+Use **Change account** on the review step to choose a different one. Before
+confirming, send a follow-up message such as `payee should be Cafe Amazon`,
+`category should be Dining`, or `memo should be lunch` to revise the preview.
 
 To check YNAB access by itself, run:
 

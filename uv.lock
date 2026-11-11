@@ -438,6 +438,7 @@ dependencies = [
     { name = "gunicorn" },
     { name = "openai" },
     { name = "python-dotenv" },
+    { name = "typing-extensions" },
     { name = "ynab" },
 ]
 
@@ -447,6 +448,7 @@ requires-dist = [
     { name = "gunicorn", specifier = ">=27.0.0" },
     { name = "openai", specifier = ">=3.48.0" },
     { name = "python-dotenv", specifier = ">=1.2.4" },
+    { name = "typing-extensions", specifier = ">=4.16.0" },
     { name = "ynab", specifier = ">=5.0.0" },
 ]
 
